@@ -9,6 +9,8 @@ from app.config import settings
 from app.consistency.revision import revision_generator
 from app.database.oracle import clear_vectors
 from app.database.oracle import delete_namespace as delete_namespace_data
+from app.database.oracle import get_namespaces as get_namespaces_data
+
 from app.database.pools import get_pool_stats
 from app.jobs.manager import job_manager
 from app.rebalancing.worker import rebalance_vectors
@@ -107,6 +109,33 @@ async def reinitialize_cluster(_: ReinitializeRequest):
 @router.get("/shards")
 async def list_shards():
     return {"shards": get_pool_stats()}
+
+
+@router.get("/namespaces")
+async def list_namespaces():
+    healthy = registry.get_healthy_shards()
+    if not healthy:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No database shards are available"
+        )
+    
+    async def get_for_shard(shard_id: str):
+        try:
+            return await asyncio.wait_for(
+                get_namespaces_data(shard_id),
+                timeout=settings.shard_query_timeout_seconds,
+            )
+        except Exception:
+            return []
+            
+    outcomes = await asyncio.gather(*(get_for_shard(shard_id) for shard_id in healthy))
+    all_namespaces = set()
+    for ns_list in outcomes:
+        all_namespaces.update(ns_list)
+        
+    return {"namespaces": sorted(list(all_namespaces))}
+
 
 
 @router.post("/shards/{shard_id}/drain")

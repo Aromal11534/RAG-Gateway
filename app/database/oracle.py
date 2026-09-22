@@ -104,6 +104,9 @@ ORDER BY namespace, id
 FETCH FIRST :page_size ROWS ONLY
 """
 
+GET_NAMESPACES_QUERY = "SELECT DISTINCT namespace FROM vector_items WHERE is_deleted = 0"
+
+
 
 def _require_pool(shard_id: str):
     pool = get_pool(shard_id)
@@ -366,6 +369,19 @@ async def scan_vector_page(
                     }
                 )
     return results
+
+
+async def get_namespaces(shard_id: str) -> List[str]:
+    pool = _require_pool(shard_id)
+    results: List[str] = []
+    async with pool.acquire() as connection:
+        async with connection.cursor() as cursor:
+            await cursor.execute(GET_NAMESPACES_QUERY)
+            for row in await cursor.fetchall():
+                if row[0]:
+                    results.append(row[0])
+    return results
+
 
 
 async def delete_vector(shard_id: str, item_id: str, namespace: str, revision: int) -> int:
