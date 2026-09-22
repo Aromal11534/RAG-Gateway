@@ -4,7 +4,7 @@ import logging
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Awaitable, Dict
+from typing import Any, Awaitable, Callable, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class JobManager:
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                '''CREATE TABLE IF NOT EXISTS jobs (
+                """CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 operation TEXT,
                 payload TEXT,
@@ -34,8 +34,9 @@ class JobManager:
                 started_at TEXT,
                 finished_at TEXT,
                 result TEXT,
-                error TEXT
-            )'''
+                error TEXT,
+                durable INTEGER
+            )"""
             )
             # Reset running jobs to queued on startup
             conn.execute("UPDATE jobs SET status = 'queued' WHERE status = 'running'")
@@ -48,7 +49,8 @@ class JobManager:
         created_at = _now()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "INSERT INTO jobs (id, operation, payload, status, created_at, durable) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO jobs (id, operation, payload, status, created_at, durable) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (job_id, operation, json.dumps(payload), "queued", created_at, 1),
             )
         return {
@@ -86,10 +88,15 @@ class JobManager:
     def _fetch_next_job(self) -> dict | None:
         with sqlite3.connect(self.db_path, isolation_level="EXCLUSIVE") as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute("SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1")
+            cursor = conn.execute(
+                "SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+            )
             row = cursor.fetchone()
             if row:
-                conn.execute("UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?", (_now(), row["id"]))
+                conn.execute(
+                    "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
+                    (_now(), row["id"]),
+                )
                 conn.commit()
                 return dict(row)
         return None
@@ -98,7 +105,7 @@ class JobManager:
         job_id = job["id"]
         operation = job["operation"]
         payload = json.loads(job["payload"])
-        
+
         handler = self._handlers.get(operation)
         if not handler:
             await self._update_job(job_id, "failed", error=f"No handler for operation: {operation}")
@@ -106,18 +113,23 @@ class JobManager:
 
         try:
             result = await handler(payload)
-            await self._update_job(job_id, "completed", result=json.dumps(result) if result else None)
+            result_str = json.dumps(result) if result else None
+            await self._update_job(job_id, "completed", result=result_str)
         except Exception as e:
             logger.exception("Job %s failed", job_id)
             await self._update_job(job_id, "failed", error=str(e))
 
-    async def _update_job(self, job_id: str, status: str, result: str | None = None, error: str | None = None):
+    async def _update_job(
+        self, job_id: str, status: str, result: str | None = None, error: str | None = None
+    ):
         def _update():
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
-                    "UPDATE jobs SET status = ?, finished_at = ?, result = ?, error = ? WHERE id = ?",
-                    (status, _now(), result, error, job_id)
+                    "UPDATE jobs SET status = ?, finished_at = ?, result = ?, error = ? "
+                    "WHERE id = ?",
+                    (status, _now(), result, error, job_id),
                 )
+
         await asyncio.to_thread(_update)
 
     def start(self):

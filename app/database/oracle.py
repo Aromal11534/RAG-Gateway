@@ -8,6 +8,7 @@ from app.database.pools import get_pool
 
 class StaleRevisionError(Exception):
     """Raised when an upsert fails because the provided revision is older than the existing one."""
+
     pass
 
 
@@ -74,11 +75,19 @@ WHERE namespace = :namespace AND document_id = :document_id AND is_deleted = 0
 ORDER BY chunk_index, id
 """
 
-DELETE_QUERY = "UPDATE vector_items SET is_deleted = 1, revision = :revision, updated_at = SYSTIMESTAMP WHERE id = :id AND namespace = :namespace AND revision < :revision"
-DELETE_DOCUMENT_QUERY = (
-    "UPDATE vector_items SET is_deleted = 1, revision = :revision, updated_at = SYSTIMESTAMP WHERE namespace = :namespace AND document_id = :document_id AND revision < :revision"
+DELETE_QUERY = (
+    "UPDATE vector_items SET is_deleted = 1, revision = :revision, "
+    "updated_at = SYSTIMESTAMP WHERE id = :id AND namespace = :namespace AND revision < :revision"
 )
-DELETE_NAMESPACE_QUERY = "UPDATE vector_items SET is_deleted = 1, revision = :revision, updated_at = SYSTIMESTAMP WHERE namespace = :namespace AND revision < :revision"
+DELETE_DOCUMENT_QUERY = (
+    "UPDATE vector_items SET is_deleted = 1, revision = :revision, "
+    "updated_at = SYSTIMESTAMP WHERE namespace = :namespace AND "
+    "document_id = :document_id AND revision < :revision"
+)
+DELETE_NAMESPACE_QUERY = (
+    "UPDATE vector_items SET is_deleted = 1, revision = :revision, "
+    "updated_at = SYSTIMESTAMP WHERE namespace = :namespace AND revision < :revision"
+)
 CLEAR_QUERY = "DELETE FROM vector_items"
 
 SCAN_VECTORS_QUERY = """

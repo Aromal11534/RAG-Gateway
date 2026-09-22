@@ -20,9 +20,17 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.config import settings
 from app.consistency.reconciler import repair_vector_replicas
 from app.consistency.revision import content_hash, newest, revision_generator
-from app.database.oracle import delete_vector as delete_vector_from_shard
-from app.database.oracle import get_vector as get_vector_from_shard
-from app.database.oracle import insert_vector, upsert_vector, StaleRevisionError
+from app.database.oracle import (
+    StaleRevisionError,
+    insert_vector,
+    upsert_vector,
+)
+from app.database.oracle import (
+    delete_vector as delete_vector_from_shard,
+)
+from app.database.oracle import (
+    get_vector as get_vector_from_shard,
+)
 from app.embeddings.adapter import embed_text, embed_texts
 from app.router.shard_registry import registry
 
@@ -417,6 +425,7 @@ async def _delete_vector_everywhere(item_id: str, namespace: str, revision: int)
             detail="Deletion was only partially completed; retry is safe",
         )
     return affected
+
 
 @router.delete("/{item_id}")
 async def delete_vector_endpoint(

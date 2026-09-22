@@ -6,7 +6,14 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.api.vectors import VectorItem, _write, _delete_vector_everywhere, _all_placements, _reserve_placements, _get_one
+from app.api.vectors import (
+    VectorItem,
+    _all_placements,
+    _delete_vector_everywhere,
+    _get_one,
+    _reserve_placements,
+    _write,
+)
 from app.config import settings
 from app.consistency.revision import newest, revision_generator
 from app.database.oracle import delete_document, get_document_chunks
@@ -113,7 +120,7 @@ async def _ingest_document(req: DocumentIngestRequest) -> dict:
             status_code=503,
             detail="Embedding service is unavailable",
         ) from exc
-        
+
     old_generation_id = None
     if req.replace_existing:
         old_generation_id = await _get_manifest(document_id, req.namespace)
@@ -154,7 +161,7 @@ async def _ingest_document(req: DocumentIngestRequest) -> dict:
         raise RuntimeError(
             f"{len(failures)} of {len(chunks)} chunks failed; retry the document ingestion"
         )
-        
+
     manifest_item = VectorItem(
         id=f"doc_manifest:{document_id}",
         namespace=req.namespace,
@@ -164,17 +171,26 @@ async def _ingest_document(req: DocumentIngestRequest) -> dict:
         chunk_index=0,
     )
     await _write(manifest_item, upsert=True)
-    
+
     if old_generation_id:
         revision = revision_generator.next()
-        job_manager.submit("cleanup_old_generation", {"document_id": old_generation_id, "namespace": req.namespace, "revision": revision})
+        job_manager.submit(
+            "cleanup_old_generation",
+            {
+                "document_id": old_generation_id,
+                "namespace": req.namespace,
+                "revision": revision,
+            },
+        )
 
     return {
         "status": "ingested",
         "id": document_id,
         "namespace": req.namespace,
         "chunks": len(chunks),
-        "partial_chunks": sum(bool(result.get("partial")) for result in results if isinstance(result, dict)),
+        "partial_chunks": sum(
+            bool(result.get("partial")) for result in results if isinstance(result, dict)
+        ),
     }
 
 
@@ -190,9 +206,16 @@ async def ingest_document(
         return operation
     return await _ingest_document(req)
 
+
 # Register job handlers
-job_manager.register("document_ingestion", lambda p: _ingest_document(DocumentIngestRequest(**p)))
-job_manager.register("cleanup_old_generation", lambda p: _delete_everywhere(p["document_id"], p["namespace"], p["revision"]))
+job_manager.register(
+    "document_ingestion",
+    lambda p: _ingest_document(DocumentIngestRequest(**p)),
+)
+job_manager.register(
+    "cleanup_old_generation",
+    lambda p: _delete_everywhere(p["document_id"], p["namespace"], p["revision"]),
+)
 
 
 @router.get("/{document_id}")
@@ -203,7 +226,7 @@ async def get_document(
     active_generation = await _get_manifest(document_id, namespace)
     if not active_generation:
         raise HTTPException(status_code=404, detail="Document not found")
-        
+
     candidates = [shard_id for shard_id in registry.shards if registry.reserve(shard_id)]
     if not candidates:
         raise HTTPException(status_code=503, detail="No database shard is available")
@@ -251,11 +274,11 @@ async def delete_document_endpoint(
     active_generation = await _get_manifest(document_id, namespace)
     if not active_generation:
         raise HTTPException(status_code=404, detail="Document not found")
-        
+
     revision = revision_generator.next()
     await _delete_vector_everywhere(f"doc_manifest:{document_id}", namespace, revision)
     affected = await _delete_everywhere(active_generation, namespace, revision)
-    
+
     return {
         "status": "deleted",
         "id": document_id,

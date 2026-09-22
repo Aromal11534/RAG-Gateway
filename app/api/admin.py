@@ -163,4 +163,12 @@ async def start_rebalance(req: RebalanceRequest):
     )
     return operation
 
-job_manager.register("rebalance", lambda p: rebalance_vectors(p.get("namespace"), p.get("delete_extras", True), p.get("page_size", 100)))
+
+job_manager.register(
+    "rebalance",
+    lambda p: rebalance_vectors(
+        p.get("namespace"),
+        p.get("delete_extras", True),
+        p.get("page_size", 100),
+    ),
+)

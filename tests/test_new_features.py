@@ -200,17 +200,39 @@ def test_background_job_lifecycle():
     from app.jobs.manager import JobManager
 
     async def scenario():
-        manager = JobManager()
+        import os
+        import tempfile
 
-        async def work():
-            await asyncio.sleep(0)
-            return {"done": True}
+        db_fd, db_path = tempfile.mkstemp(suffix=".sqlite3")
+        os.close(db_fd)
 
-        job = manager.submit("test", work())
-        await asyncio.gather(*manager._tasks)
-        completed = manager.get(job["id"])
-        assert completed["status"] == "completed"
-        assert completed["result"] == {"done": True}
+        try:
+            manager = JobManager(db_path)
+            manager.start()
+
+            async def work(payload):
+                await asyncio.sleep(0.1)
+                return {"done": payload.get("ok", False)}
+
+            manager.register("test", work)
+            job = manager.submit("test", {"ok": True})
+
+            # Wait for job to process
+            for _ in range(10):
+                completed = manager.get(job["id"])
+                if completed and completed["status"] == "completed":
+                    break
+                await asyncio.sleep(0.1)
+
+            await manager.shutdown()
+
+            completed = manager.get(job["id"])
+            assert completed["status"] == "completed"
+            import json
+
+            assert json.loads(completed["result"]) == {"done": True}
+        finally:
+            os.remove(db_path)
 
     asyncio.run(scenario())
 

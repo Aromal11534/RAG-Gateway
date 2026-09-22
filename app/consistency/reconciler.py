@@ -2,7 +2,8 @@ import asyncio
 import logging
 
 from app.config import settings
-from app.database.oracle import upsert_vector, delete_vector as delete_vector_from_shard
+from app.database.oracle import delete_vector as delete_vector_from_shard
+from app.database.oracle import upsert_vector
 from app.router.shard_registry import registry
 
 logger = logging.getLogger(__name__)
