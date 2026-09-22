@@ -13,9 +13,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+import tempfile
+import os
+
 class JobManager:
-    def __init__(self, db_path: str = "jobs.sqlite3"):
-        self.db_path = db_path
+    def __init__(self, db_path: str | None = None):
+        self.db_path = db_path or os.path.join(tempfile.gettempdir(), "jobs.sqlite3")
         self._handlers: Dict[str, Callable[[dict], Awaitable[Any]]] = {}
         self._init_db()
         self._tasks: set[asyncio.Task] = set()

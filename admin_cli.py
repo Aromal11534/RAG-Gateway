@@ -25,7 +25,8 @@ def load_env():
 
 load_env()
 
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://127.0.0.1:8000")
+port = os.environ.get("GATEWAY_PORT", "8000")
+GATEWAY_URL = os.environ.get("GATEWAY_URL", f"http://127.0.0.1:{port}")
 API_KEY = os.environ.get("GATEWAY_API_KEY", "")
 ADMIN_KEY = os.environ.get("ADMIN_API_KEY", "")
 
