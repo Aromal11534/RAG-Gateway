@@ -24,6 +24,7 @@ async def lifespan(_: FastAPI):
     await initialize_pools()
     try:
         await initialize_model()
+        job_manager.start()
         yield
     finally:
         await job_manager.shutdown()

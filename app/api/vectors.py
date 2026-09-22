@@ -22,7 +22,7 @@ from app.consistency.reconciler import repair_vector_replicas
 from app.consistency.revision import content_hash, newest, revision_generator
 from app.database.oracle import delete_vector as delete_vector_from_shard
 from app.database.oracle import get_vector as get_vector_from_shard
-from app.database.oracle import insert_vector, upsert_vector
+from app.database.oracle import insert_vector, upsert_vector, StaleRevisionError
 from app.embeddings.adapter import embed_text, embed_texts
 from app.router.shard_registry import registry
 
@@ -130,7 +130,7 @@ async def _write_one(
         )
         registry.circuit_breaker.record_success(shard_id)
         return True, False
-    except oracledb.IntegrityError:
+    except (oracledb.IntegrityError, StaleRevisionError):
         return False, True
     except Exception:
         registry.circuit_breaker.record_failure(shard_id)
@@ -265,10 +265,10 @@ async def _write(
     }
 
 
-async def _delete_one(shard_id: str, item_id: str, namespace: str):
+async def _delete_one(shard_id: str, item_id: str, namespace: str, revision: int):
     try:
         affected = await asyncio.wait_for(
-            delete_vector_from_shard(shard_id, item_id, namespace),
+            delete_vector_from_shard(shard_id, item_id, namespace, revision),
             timeout=settings.shard_query_timeout_seconds,
         )
         registry.circuit_breaker.record_success(shard_id)
@@ -377,6 +377,8 @@ async def get_vector_endpoint(
             intended,
             observed,
         )
+        if latest.get("is_deleted"):
+            raise HTTPException(status_code=404, detail="Vector not found")
         digest = latest.get("content_hash")
         if digest:
             etag = f'"{digest}"'
@@ -397,12 +399,7 @@ async def get_vector_endpoint(
     raise HTTPException(status_code=404, detail="Vector not found")
 
 
-@router.delete("/{item_id}")
-async def delete_vector_endpoint(
-    item_id: str = Path(min_length=1, max_length=512),
-    namespace: str = Query(min_length=1, max_length=128),
-):
-    namespace = _clean_namespace(namespace)
+async def _delete_vector_everywhere(item_id: str, namespace: str, revision: int) -> int:
     placements = _all_placements(item_id, namespace)
     candidates = _reserve_placements(placements)
     if len(candidates) != len(registry.shards):
@@ -410,9 +407,8 @@ async def delete_vector_endpoint(
             status_code=503,
             detail="Deletion requires every shard to be available",
         )
-
     outcomes = await asyncio.gather(
-        *(_delete_one(shard_id, item_id, namespace) for shard_id in candidates)
+        *(_delete_one(shard_id, item_id, namespace, revision) for shard_id in candidates)
     )
     affected = sum(count for count, _ in outcomes)
     if not all(succeeded for _, succeeded in outcomes):
@@ -420,6 +416,16 @@ async def delete_vector_endpoint(
             status_code=503,
             detail="Deletion was only partially completed; retry is safe",
         )
+    return affected
+
+@router.delete("/{item_id}")
+async def delete_vector_endpoint(
+    item_id: str = Path(min_length=1, max_length=512),
+    namespace: str = Query(min_length=1, max_length=128),
+):
+    namespace = _clean_namespace(namespace)
+    revision = revision_generator.next()
+    affected = await _delete_vector_everywhere(item_id, namespace, revision)
     if affected == 0:
         raise HTTPException(status_code=404, detail="Vector not found")
     return {"status": "deleted", "id": item_id, "namespace": namespace}

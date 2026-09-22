@@ -6,9 +6,9 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.api.vectors import VectorItem, _write
+from app.api.vectors import VectorItem, _write, _delete_vector_everywhere, _all_placements, _reserve_placements, _get_one
 from app.config import settings
-from app.consistency.revision import newest
+from app.consistency.revision import newest, revision_generator
 from app.database.oracle import delete_document, get_document_chunks
 from app.embeddings.adapter import embed_texts
 from app.ingestion.chunker import chunk_text
@@ -53,7 +53,21 @@ class DocumentIngestRequest(BaseModel):
         return self
 
 
-async def _delete_everywhere(document_id: str, namespace: str) -> int:
+async def _get_manifest(document_id: str, namespace: str) -> str | None:
+    manifest_id = f"doc_manifest:{document_id}"
+    placements = _all_placements(manifest_id, namespace)
+    candidates = _reserve_placements(placements)
+    outcomes = await asyncio.gather(
+        *(_get_one(shard_id, manifest_id, namespace) for shard_id in candidates)
+    )
+    found = [res for res, succeeded in outcomes if succeeded and res is not None]
+    latest = newest(found)
+    if latest and not latest.get("is_deleted"):
+        return latest.get("metadata", {}).get("active_generation")
+    return None
+
+
+async def _delete_everywhere(document_id: str, namespace: str, revision: int) -> int:
     candidates = [shard_id for shard_id in registry.shards if registry.reserve(shard_id)]
     if len(candidates) != len(registry.shards):
         raise HTTPException(
@@ -64,7 +78,7 @@ async def _delete_everywhere(document_id: str, namespace: str) -> int:
     async def delete_one(shard_id: str) -> tuple[int, bool]:
         try:
             affected = await asyncio.wait_for(
-                delete_document(shard_id, document_id, namespace),
+                delete_document(shard_id, document_id, namespace, revision),
                 timeout=settings.shard_query_timeout_seconds,
             )
             registry.circuit_breaker.record_success(shard_id)
@@ -99,9 +113,12 @@ async def _ingest_document(req: DocumentIngestRequest) -> dict:
             status_code=503,
             detail="Embedding service is unavailable",
         ) from exc
+        
+    old_generation_id = None
     if req.replace_existing:
-        await _delete_everywhere(document_id, req.namespace)
+        old_generation_id = await _get_manifest(document_id, req.namespace)
 
+    generation_id = str(uuid.uuid4())
     semaphore = asyncio.Semaphore(settings.max_batch_concurrency)
 
     async def ingest_one(index: int) -> dict:
@@ -110,6 +127,7 @@ async def _ingest_document(req: DocumentIngestRequest) -> dict:
             **req.metadata,
             "_rag_gateway": {
                 "document_id": document_id,
+                "generation_id": generation_id,
                 "chunk_index": index,
                 "chunk_count": len(chunks),
                 "start_char": chunk.start_char,
@@ -117,11 +135,11 @@ async def _ingest_document(req: DocumentIngestRequest) -> dict:
             },
         }
         item = VectorItem(
-            id=f"{document_id}:chunk:{index:06d}",
+            id=f"{generation_id}:chunk:{index:06d}",
             namespace=req.namespace,
             text=chunk.text,
             metadata=metadata,
-            document_id=document_id,
+            document_id=generation_id,
             chunk_index=index,
         )
         async with semaphore:
@@ -136,12 +154,27 @@ async def _ingest_document(req: DocumentIngestRequest) -> dict:
         raise RuntimeError(
             f"{len(failures)} of {len(chunks)} chunks failed; retry the document ingestion"
         )
+        
+    manifest_item = VectorItem(
+        id=f"doc_manifest:{document_id}",
+        namespace=req.namespace,
+        text=f"Manifest for {document_id}",
+        metadata={"active_generation": generation_id},
+        document_id=document_id,
+        chunk_index=0,
+    )
+    await _write(manifest_item, upsert=True)
+    
+    if old_generation_id:
+        revision = revision_generator.next()
+        job_manager.submit("cleanup_old_generation", {"document_id": old_generation_id, "namespace": req.namespace, "revision": revision})
+
     return {
         "status": "ingested",
         "id": document_id,
         "namespace": req.namespace,
         "chunks": len(chunks),
-        "partial_chunks": sum(bool(result.get("partial")) for result in results),
+        "partial_chunks": sum(bool(result.get("partial")) for result in results if isinstance(result, dict)),
     }
 
 
@@ -152,10 +185,14 @@ async def ingest_document(
     background: bool = Query(default=False),
 ):
     if background:
-        operation = job_manager.submit("document_ingestion", _ingest_document(req))
+        operation = job_manager.submit("document_ingestion", req.model_dump())
         response.status_code = status.HTTP_202_ACCEPTED
         return operation
     return await _ingest_document(req)
+
+# Register job handlers
+job_manager.register("document_ingestion", lambda p: _ingest_document(DocumentIngestRequest(**p)))
+job_manager.register("cleanup_old_generation", lambda p: _delete_everywhere(p["document_id"], p["namespace"], p["revision"]))
 
 
 @router.get("/{document_id}")
@@ -163,6 +200,10 @@ async def get_document(
     document_id: str = Path(min_length=1, max_length=480),
     namespace: str = Query(min_length=1, max_length=128),
 ):
+    active_generation = await _get_manifest(document_id, namespace)
+    if not active_generation:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
     candidates = [shard_id for shard_id in registry.shards if registry.reserve(shard_id)]
     if not candidates:
         raise HTTPException(status_code=503, detail="No database shard is available")
@@ -170,7 +211,7 @@ async def get_document(
     async def get_one(shard_id: str) -> tuple[list[dict], bool]:
         try:
             chunks = await asyncio.wait_for(
-                get_document_chunks(shard_id, namespace, document_id),
+                get_document_chunks(shard_id, namespace, active_generation),
                 timeout=settings.shard_query_timeout_seconds,
             )
             registry.circuit_breaker.record_success(shard_id)
@@ -190,7 +231,7 @@ async def get_document(
         completed = sum(1 for _, succeeded in outcomes if succeeded)
         if completed != len(registry.shards):
             raise HTTPException(status_code=503, detail="Document lookup was incomplete")
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail="Document chunks missing")
     return {
         "id": document_id,
         "namespace": namespace,
@@ -207,9 +248,14 @@ async def delete_document_endpoint(
     document_id: str = Path(min_length=1, max_length=480),
     namespace: str = Query(min_length=1, max_length=128),
 ):
-    affected = await _delete_everywhere(document_id, namespace)
-    if affected == 0:
+    active_generation = await _get_manifest(document_id, namespace)
+    if not active_generation:
         raise HTTPException(status_code=404, detail="Document not found")
+        
+    revision = revision_generator.next()
+    await _delete_vector_everywhere(f"doc_manifest:{document_id}", namespace, revision)
+    affected = await _delete_everywhere(active_generation, namespace, revision)
+    
     return {
         "status": "deleted",
         "id": document_id,

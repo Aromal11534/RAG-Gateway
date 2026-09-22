@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from app.config import settings
-from app.database.oracle import upsert_vector
+from app.database.oracle import upsert_vector, delete_vector as delete_vector_from_shard
 from app.router.shard_registry import registry
 
 logger = logging.getLogger(__name__)
@@ -26,21 +26,29 @@ async def repair_vector_replicas(
         if not registry.is_available(shard_id):
             return False
         try:
-            await asyncio.wait_for(
-                upsert_vector(
-                    shard_id,
-                    latest["id"],
-                    latest["namespace"],
-                    latest["text"],
-                    latest["metadata"],
-                    latest["_embedding"],
-                    revision=latest_revision,
-                    content_hash=latest.get("content_hash"),
-                    document_id=latest.get("document_id"),
-                    chunk_index=latest.get("chunk_index"),
-                ),
-                timeout=settings.shard_query_timeout_seconds,
-            )
+            if latest.get("is_deleted"):
+                await asyncio.wait_for(
+                    delete_vector_from_shard(
+                        shard_id, latest["id"], latest["namespace"], latest_revision
+                    ),
+                    timeout=settings.shard_query_timeout_seconds,
+                )
+            else:
+                await asyncio.wait_for(
+                    upsert_vector(
+                        shard_id,
+                        latest["id"],
+                        latest["namespace"],
+                        latest["text"],
+                        latest["metadata"],
+                        latest["_embedding"],
+                        revision=latest_revision,
+                        content_hash=latest.get("content_hash"),
+                        document_id=latest.get("document_id"),
+                        chunk_index=latest.get("chunk_index"),
+                    ),
+                    timeout=settings.shard_query_timeout_seconds,
+                )
             registry.circuit_breaker.record_success(shard_id)
             return True
         except Exception:

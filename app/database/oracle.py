@@ -5,6 +5,12 @@ from typing import Any, Dict, List, Optional
 
 from app.database.pools import get_pool
 
+
+class StaleRevisionError(Exception):
+    """Raised when an upsert fails because the provided revision is older than the existing one."""
+    pass
+
+
 VECTOR_SEARCH_QUERY = """
 SELECT id,
        VECTOR_DISTANCE(embedding, :embedding, COSINE) AS score,
@@ -15,7 +21,7 @@ SELECT id,
        document_id,
        chunk_index
 FROM vector_items
-WHERE namespace = :namespace
+WHERE namespace = :namespace AND is_deleted = 0
 ORDER BY score
 FETCH FIRST :top_k ROWS ONLY
 """
@@ -41,6 +47,7 @@ WHEN MATCHED THEN UPDATE SET
     target.content_hash = :content_hash,
     target.document_id = :document_id,
     target.chunk_index = :chunk_index,
+    target.is_deleted = 0,
     target.updated_at = SYSTIMESTAMP
     WHERE :revision >= target.revision
 WHEN NOT MATCHED THEN INSERT
@@ -53,7 +60,7 @@ VALUES
 
 GET_QUERY = """
 SELECT id, namespace, chunk_text, metadata_json, embedding, revision, content_hash,
-       document_id, chunk_index
+       document_id, chunk_index, is_deleted
 FROM vector_items
 WHERE id = :id AND namespace = :namespace
 FETCH FIRST 1 ROW ONLY
@@ -63,20 +70,20 @@ GET_DOCUMENT_QUERY = """
 SELECT id, namespace, chunk_text, metadata_json, revision, content_hash,
        document_id, chunk_index
 FROM vector_items
-WHERE namespace = :namespace AND document_id = :document_id
+WHERE namespace = :namespace AND document_id = :document_id AND is_deleted = 0
 ORDER BY chunk_index, id
 """
 
-DELETE_QUERY = "DELETE FROM vector_items WHERE id = :id AND namespace = :namespace"
+DELETE_QUERY = "UPDATE vector_items SET is_deleted = 1, revision = :revision, updated_at = SYSTIMESTAMP WHERE id = :id AND namespace = :namespace AND revision < :revision"
 DELETE_DOCUMENT_QUERY = (
-    "DELETE FROM vector_items WHERE namespace = :namespace AND document_id = :document_id"
+    "UPDATE vector_items SET is_deleted = 1, revision = :revision, updated_at = SYSTIMESTAMP WHERE namespace = :namespace AND document_id = :document_id AND revision < :revision"
 )
-DELETE_NAMESPACE_QUERY = "DELETE FROM vector_items WHERE namespace = :namespace"
+DELETE_NAMESPACE_QUERY = "UPDATE vector_items SET is_deleted = 1, revision = :revision, updated_at = SYSTIMESTAMP WHERE namespace = :namespace AND revision < :revision"
 CLEAR_QUERY = "DELETE FROM vector_items"
 
 SCAN_VECTORS_QUERY = """
 SELECT id, namespace, chunk_text, metadata_json, embedding, revision, content_hash,
-       document_id, chunk_index
+       document_id, chunk_index, is_deleted
 FROM vector_items
 WHERE (:namespace IS NULL OR namespace = :namespace)
   AND (
@@ -214,6 +221,8 @@ async def upsert_vector(
                     chunk_index,
                 ),
             )
+            if cursor.rowcount == 0:
+                raise StaleRevisionError()
         await connection.commit()
 
 
@@ -275,6 +284,7 @@ async def get_vector(
                 "content_hash": row[6],
                 "document_id": row[7],
                 "chunk_index": row[8],
+                "is_deleted": bool(row[9]) if len(row) > 9 and row[9] else False,
                 "shard_id": shard_id,
             }
 
@@ -342,33 +352,34 @@ async def scan_vector_page(
                         "content_hash": row[6],
                         "document_id": row[7],
                         "chunk_index": row[8],
+                        "is_deleted": bool(row[9]) if len(row) > 9 and row[9] else False,
                         "shard_id": shard_id,
                     }
                 )
     return results
 
 
-async def delete_vector(shard_id: str, item_id: str, namespace: str) -> int:
+async def delete_vector(shard_id: str, item_id: str, namespace: str, revision: int) -> int:
     return await _execute_delete(
         shard_id,
         DELETE_QUERY,
-        {"id": item_id, "namespace": namespace},
+        {"id": item_id, "namespace": namespace, "revision": revision},
     )
 
 
-async def delete_document(shard_id: str, document_id: str, namespace: str) -> int:
+async def delete_document(shard_id: str, document_id: str, namespace: str, revision: int) -> int:
     return await _execute_delete(
         shard_id,
         DELETE_DOCUMENT_QUERY,
-        {"document_id": document_id, "namespace": namespace},
+        {"document_id": document_id, "namespace": namespace, "revision": revision},
     )
 
 
-async def delete_namespace(shard_id: str, namespace: str) -> int:
+async def delete_namespace(shard_id: str, namespace: str, revision: int) -> int:
     return await _execute_delete(
         shard_id,
         DELETE_NAMESPACE_QUERY,
-        {"namespace": namespace},
+        {"namespace": namespace, "revision": revision},
     )
 
 

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import settings
+from app.consistency.revision import revision_generator
 from app.database.oracle import clear_vectors
 from app.database.oracle import delete_namespace as delete_namespace_data
 from app.database.pools import get_pool_stats
@@ -86,8 +87,9 @@ async def delete_namespace(
     namespace = namespace.strip()
     if not namespace:
         raise HTTPException(status_code=422, detail="namespace must not be blank")
+    revision = revision_generator.next()
     affected = await _run_cluster_operation(
-        lambda shard_id: delete_namespace_data(shard_id, namespace)
+        lambda shard_id: delete_namespace_data(shard_id, namespace, revision)
     )
     return {
         "status": "namespace_deleted",
@@ -153,10 +155,12 @@ async def inspect_placement(req: PlacementRequest):
 async def start_rebalance(req: RebalanceRequest):
     operation = job_manager.submit(
         "rebalance",
-        rebalance_vectors(
-            namespace=req.namespace,
-            delete_extras=req.delete_extras,
-            page_size=req.page_size,
-        ),
+        {
+            "namespace": req.namespace,
+            "delete_extras": req.delete_extras,
+            "page_size": req.page_size,
+        },
     )
     return operation
+
+job_manager.register("rebalance", lambda p: rebalance_vectors(p.get("namespace"), p.get("delete_extras", True), p.get("page_size", 100)))

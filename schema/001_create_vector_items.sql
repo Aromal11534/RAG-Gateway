@@ -8,6 +8,7 @@ CREATE TABLE vector_items (
     content_hash   VARCHAR2(64 CHAR),
     document_id    VARCHAR2(512 CHAR),
     chunk_index    NUMBER,
+    is_deleted     NUMBER(1) DEFAULT 0 NOT NULL,
     created_at     TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     updated_at     TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     CONSTRAINT vector_items_pk PRIMARY KEY (namespace, id),
